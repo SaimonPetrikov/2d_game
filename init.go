@@ -19,6 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/examples/resources/images"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	_ "github.com/hajimehoshi/ebiten/v2/vector"
 	"image"
 	"image/color"
 	_ "image/png"
@@ -26,11 +30,6 @@ import (
 	"math"
 	"os"
 	"sort"
-
-	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
-	"github.com/hajimehoshi/ebiten/v2/examples/resources/images"
-	"github.com/hajimehoshi/ebiten/v2/inpututil"
-	_ "github.com/hajimehoshi/ebiten/v2/vector"
 )
 
 const (
@@ -47,11 +46,22 @@ const (
 	frameCount         = 17
 )
 
+type Bullets struct {
+	shotImage *ebiten.Image
+	camAngle  float64
+	move      int
+	count     int
+	speed     float64
+	x         float64
+	y         float64
+}
+
 var (
 	bgImage       *ebiten.Image
 	shadowImage   = ebiten.NewImage(screenWidth, screenHeight)
 	triangleImage = ebiten.NewImage(screenWidth, screenHeight)
 	runnerImage   *ebiten.Image
+	shotImage     *ebiten.Image
 )
 
 func init() {
@@ -212,6 +222,30 @@ func (g *Game) handleMovement() {
 		g.py = padding + frameHeightCurrent
 	}
 
+	for _, p := range g.projectTiles {
+		p.move++
+		p.count++
+		p.x = p.x - math.Sin(p.camAngle)*p.speed
+		p.y = p.y + math.Cos(p.camAngle)*p.speed
+	}
+
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		mouseX, mouseY := ebiten.CursorPosition()
+		centerX := float64(screenWidth / 2)
+		centerY := float64(screenWidth / 2)
+		angle := angleBetweenPoints(centerX, centerY, float64(mouseX), float64(mouseY))
+		bullet := &Bullets{
+			shotImage: shotImage,
+			camAngle:  angle,
+			move:      1,
+			count:     1,
+			speed:     5,
+			x:         centerX,
+			y:         centerY,
+		}
+		g.projectTiles = append(g.projectTiles, bullet)
+	}
+
 }
 
 func rayVertices(x1, y1, x2, y2, x3, y3 float64) []ebiten.Vertex {
@@ -223,10 +257,14 @@ func rayVertices(x1, y1, x2, y2, x3, y3 float64) []ebiten.Vertex {
 }
 
 type Game struct {
-	showRays bool
-	px, py   int
-	objects  []object
-	count    int
+	showRays     bool
+	px, py       int
+	outerWalls   []object
+	objects      []object
+	projectTiles []*Bullets
+	count        int
+	countShot    int
+	shotMove     int
 }
 
 func (g *Game) Update() error {
@@ -268,11 +306,67 @@ func (g *Game) DrawPlayer(screen *ebiten.Image) {
 	screen.DrawImage(runnerImage.SubImage(image.Rect(sx, sy, sx+frameWidth, sy+frameHeight)).(*ebiten.Image), op)
 }
 
+func (g *Game) renderSprite(screen *ebiten.Image, count int, x float64, y float64, camAngle float64) {
+	opShot := &ebiten.DrawImageOptions{}
+	opShot.GeoM.Translate(-float64(32)/2+7, -float64(32)/2-frameHeightCurrent*2-8)
+	opShot.GeoM.Rotate(-3.3)
+	opShot.GeoM.Rotate(camAngle)
+	opShot.GeoM.Translate(x, y)
+	//opShot.GeoM.Translate(-px, -py)
+	//opShot.GeoM.Translate((screenWidth)/2, (screenHeight)/2)
+
+	iShot := (count / 5) % 4
+	shotx, shoty := 0+iShot*32, 0
+
+	screen.DrawImage(shotImage.SubImage(image.Rect(shotx, shoty, shotx+32, shoty+32)).(*ebiten.Image), opShot)
+}
+
+func (g *Game) drawProjectiles(screen *ebiten.Image) {
+	for _, p := range g.projectTiles {
+		g.renderSprite(screen, p.count, p.x, p.y, p.camAngle)
+	}
+}
+
+func (g *Game) drawHouse(screen *ebiten.Image) {
+
+	sfile, err := os.Open("images/house/roof_0036_Layer-0.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func(sfile *os.File) {
+		err := sfile.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(sfile)
+
+	simg, _, err := image.Decode(sfile)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	houseImg := ebiten.NewImageFromImage(simg)
+
+	houseImgOpt := &ebiten.DrawImageOptions{}
+
+	houseImgOpt.GeoM.Scale(0.4, 0.4)
+
+	//xPosition, yPosition := float64(g.px)-screenWidth/2+20, float64(g.py)-screenHeight/2+20
+
+	houseImgOpt.GeoM.Translate(float64(g.px)-screenWidth/2+20, float64(g.py)-screenHeight/2+20)
+
+	if g.px < 200 && g.px > 144 && g.py < 207 && g.py > 107 {
+		houseImg.Clear()
+	} else {
+		screen.DrawImage(houseImg, houseImgOpt)
+	}
+}
+
 func (g *Game) Draw(screen *ebiten.Image) {
 	// Reset the shadowImage
 
 	shadowImage.Fill(color.Black)
-	rays := rayCasting(float64(g.px), float64(g.py), g.objects)
+	rays := rayCasting(float64(g.px), float64(g.py), g.outerWalls)
 
 	// Subtract ray triangles from shadow
 	opt := &ebiten.DrawTrianglesOptions{}
@@ -305,15 +399,25 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	op.ColorM.Scale(1, 1, 1, 0.7)
 	screen.DrawImage(shadowImage, op)
 
+	// Draw outer walls
+	for _, obj := range g.outerWalls {
+		for _, w := range obj.walls {
+			ebitenutil.DrawLine(screen, w.X1, w.Y1, w.X2, w.Y2, color.RGBA{255, 0, 0, 255})
+		}
+	}
 	// Draw walls
 	for _, obj := range g.objects {
 		for _, w := range obj.walls {
-			ebitenutil.DrawLine(screen, w.X1, w.Y1, w.X2, w.Y2, color.RGBA{255, 0, 0, 255})
+			ebitenutil.DrawLine(screen, float64(g.px)-w.X1, float64(g.py)-w.Y1, float64(g.px)-w.X2, float64(g.py)-w.Y2, color.RGBA{255, 0, 0, 255})
 		}
 	}
 
 	// Draw player as a rect
 	g.DrawPlayer(screen)
+
+	g.drawProjectiles(screen)
+
+	g.drawHouse(screen)
 
 	if g.showRays {
 		ebitenutil.DebugPrintAt(screen, "R: hide rays", padding, 0)
@@ -323,7 +427,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	ebitenutil.DebugPrintAt(screen, "WASD: move", 160, 0)
 	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("TPS: %0.2f", ebiten.ActualTPS()), 51, 51)
-	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Rays: 2*%d", len(rays)/2), padding, 222)
+	//ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Rays: 2*%d", len(rays)/2), padding, 222)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("X: %d", g.px), padding, 222)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Y: %d", g.py), padding+20, 222)
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
@@ -362,11 +468,29 @@ func main() {
 
 	runnerImage = ebiten.NewImageFromImage(img)
 
-	// Add outer walls
-	g.objects = append(g.objects, object{rect(padding, padding, screenWidth-2*padding, screenHeight-2*padding)})
+	sfile, err := os.Open("images/shot.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func(sfile *os.File) {
+		err := sfile.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(sfile)
 
-	// Rectangles
-	//g.objects = append(g.objects, object{rect(45, 50, 70, 20)})
+	simg, _, err := image.Decode(sfile)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	shotImage = ebiten.NewImageFromImage(simg)
+
+	// Add outer walls
+	g.outerWalls = append(g.outerWalls, object{rect(padding, padding, screenWidth-2*padding, screenHeight-2*padding)})
+
+	//Rectangles
+	g.objects = append(g.objects, object{rect(32, -7, 68, 107)})
 	//g.objects = append(g.objects, object{rect(150, 50, 30, 60)})
 	//
 	//g.objects = append(g.objects, object{rect(50, 100, 50, -1)})
